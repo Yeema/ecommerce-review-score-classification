@@ -1,20 +1,21 @@
-import torch, flair
-import logging
+from abc import abstractmethod
+from operator import itemgetter
+from typing import List, Dict, Union, Callable
 import re
 
-from abc import abstractmethod, ABC
+import torch, flair
+import logging
 
 from collections import Counter
 from collections import defaultdict
 
-from deprecated import deprecated
-from flair.file_utils import Tqdm
-from operator import itemgetter
-
-from torch.utils.data import Dataset
+from segtok.segmenter import split_single
+from segtok.tokenizer import split_contractions
+from segtok.tokenizer import word_tokenizer
+from torch.utils.data import Dataset, random_split
 from torch.utils.data.dataset import ConcatDataset, Subset
 
-from typing import List, Dict, Union, Callable, Optional
+from flair.file_utils import Tqdm
 
 log = logging.getLogger("flair")
 
@@ -174,10 +175,10 @@ class Label:
         return {"value": self.value, "confidence": self.score}
 
     def __str__(self):
-        return f"{self._value} ({round(self._score, 4)})"
+        return f"{self._value} ({self._score:.4f})"
 
     def __repr__(self):
-        return f"{self._value} ({round(self._score, 4)})"
+        return f"{self._value} ({self._score:.4f})"
 
 
 class DataPoint:
@@ -217,10 +218,6 @@ class DataPoint:
         self.annotation_layers[label_type] = [Label(value, score)]
 
         return self
-
-    def remove_labels(self, label_type: str):
-        if label_type in self.annotation_layers.keys():
-            del self.annotation_layers[label_type]
 
     def get_labels(self, label_type: str = None):
         if label_type is None:
@@ -341,18 +338,17 @@ class Token(DataPoint):
                 if name in self._embeddings.keys():
                     del self._embeddings[name]
 
-    def get_each_embedding(self, embedding_names: Optional[List[str]] = None) -> torch.tensor:
+    def get_each_embedding(self) -> torch.tensor:
         embeddings = []
         for embed in sorted(self._embeddings.keys()):
-            if embedding_names and embed not in embedding_names: continue
             embed = self._embeddings[embed].to(flair.device)
             if (flair.embedding_storage_mode == "cpu") and embed.device != flair.device:
                 embed = embed.to(flair.device)
             embeddings.append(embed)
         return embeddings
 
-    def get_embedding(self, names: Optional[List[str]] = None) -> torch.tensor:
-        embeddings = self.get_each_embedding(names)
+    def get_embedding(self) -> torch.tensor:
+        embeddings = self.get_each_embedding()
 
         if embeddings:
             return torch.cat(embeddings, dim=0)
@@ -446,15 +442,6 @@ class Span(DataPoint):
             else '<span ({}): "{}">'.format(ids, self.text)
         )
 
-    def __getitem__(self, idx: int) -> Token:
-        return self.tokens[idx]
-
-    def __iter__(self):
-        return iter(self.tokens)
-
-    def __len__(self) -> int:
-        return len(self.tokens)
-
     @property
     def tag(self):
         return self.labels[0].value
@@ -462,63 +449,6 @@ class Span(DataPoint):
     @property
     def score(self):
         return self.labels[0].score
-
-
-class Tokenizer(ABC):
-    r"""An abstract class representing a :class:`Tokenizer`.
-
-    Tokenizers are used to represent algorithms and models to split plain text into
-    individual tokens / words. All subclasses should overwrite :meth:`tokenize`, which
-    splits the given plain text into tokens. Moreover, subclasses may overwrite
-    :meth:`name`, returning a unique identifier representing the tokenizer's
-    configuration.
-    """
-
-    @abstractmethod
-    def tokenize(self, text: str) -> List[Token]:
-        raise NotImplementedError()
-
-    @property
-    def name(self) -> str:
-        return self.__class__.__name__
-
-
-@deprecated(version="0.5", reason="Use 'flair.tokenization.SpaceTokenizer' instead.")
-def space_tokenizer(text: str) -> List[Token]:
-    # We don't want to create a SpaceTokenizer object each time this function is called,
-    # so delegate the call directly to the static run_tokenize method
-    from flair.tokenization import SpaceTokenizer
-    return SpaceTokenizer.run_tokenize(text)
-
-
-@deprecated(version="0.5", reason="Use 'flair.tokenization.SegtokTokenizer' instead.")
-def segtok_tokenizer(text: str) -> List[Token]:
-    # We don't want to create a SegtokTokenizer object each time this function is called,
-    # so delegate the call directly to the static run_tokenize method
-    from flair.tokenization import SegtokTokenizer
-    return SegtokTokenizer.run_tokenize(text)
-
-
-@deprecated(version="0.5", reason="Use 'flair.tokenization.SpacyTokenizer' instead.")
-def build_spacy_tokenizer(model) -> Callable[[str], List[Token]]:
-    from flair.tokenization import SpacyTokenizer
-    spacy_tokenizer = SpacyTokenizer(model)
-
-    def tokenizer(text: str) -> List[Token]:
-        return spacy_tokenizer.tokenize(text)
-
-    return tokenizer
-
-
-@deprecated(version="0.5", reason="Use 'flair.tokenization.JapaneseTokenizer' instead.")
-def build_japanese_tokenizer(tokenizer: str = "MeCab"):
-    from flair.tokenization import JapaneseTokenizer
-    japanese_tokenizer = JapaneseTokenizer(tokenizer)
-
-    def tokenizer(text: str) -> List[Token]:
-        return japanese_tokenizer.tokenize(text)
-
-    return tokenizer
 
 
 class Sentence(DataPoint):
@@ -529,16 +459,16 @@ class Sentence(DataPoint):
     def __init__(
         self,
         text: str = None,
-        use_tokenizer: Union[bool, Tokenizer] = False,
+        use_tokenizer: Union[bool, Callable[[str], List[Token]]] = False,
         language_code: str = None,
     ):
         """
         Class to hold all meta related to a text (tokens, predictions, language code, ...)
         :param text: original string
-        :param use_tokenizer: a custom tokenizer (default is SpaceTokenizer)
-        more advanced options are SegTokTokenizer to use segtok or SpacyTokenizer to use Spacy library
-        if available). Check the implementations of abstract class Tokenizer or implement your own subclass (if you need it).
-        If instead of providing a Tokenizer, this parameter is just set to True, SegtokTokenizer will be used.
+        :param use_tokenizer: a custom tokenizer (default is space based tokenizer,
+        more advanced options are segtok_tokenizer to use segtok or build_spacy_tokenizer to use Spacy library
+        if available). Check the code of space_tokenizer to implement your own (if you need it).
+        If instead of providing a function, this parameter is just set to True, segtok will be used.
         :param labels:
         :param language_code:
         """
@@ -550,28 +480,19 @@ class Sentence(DataPoint):
 
         self.language_code: str = language_code
 
-        if isinstance(use_tokenizer, Tokenizer):
-            tokenizer = use_tokenizer
-        elif hasattr(use_tokenizer, "__call__"):
-            from flair.tokenization import TokenizerWrapper
-            tokenizer = TokenizerWrapper(use_tokenizer)
-        elif type(use_tokenizer) == bool:
-            from flair.tokenization import SegtokTokenizer, SpaceTokenizer
-            tokenizer = SegtokTokenizer() if use_tokenizer else SpaceTokenizer()
-        else:
-            raise AssertionError("Unexpected type of parameter 'use_tokenizer'. " +
-                                 "Parameter should be bool, Callable[[str], List[Token]] (deprecated), Tokenizer")
-
+        tokenizer = use_tokenizer
+        if type(use_tokenizer) == bool:
+            tokenizer = segtok_tokenizer if use_tokenizer else space_tokenizer
 
         # if text is passed, instantiate sentence with tokens (words)
         if text is not None:
             text = self._restore_windows_1252_characters(text)
-            [self.add_token(token) for token in tokenizer.tokenize(text)]
+            [self.add_token(token) for token in tokenizer(text)]
 
         # log a warning if the dataset is empty
         if text == "":
             log.warning(
-                "Warning: An empty Sentence was created! Are there empty strings in your dataset?"
+                "ACHTUNG: An empty Sentence was created! Are there empty strings in your dataset?"
             )
 
         self.tokenized = None
@@ -585,15 +506,6 @@ class Sentence(DataPoint):
 
         if type(token) is str:
             token = Token(token)
-
-        token.text = token.text.replace('\u200c', '')
-        token.text = token.text.replace('\u200b', '')
-        token.text = token.text.replace('\ufe0f', '')
-        token.text = token.text.replace('\ufeff', '')
-
-        # data with zero-width characters cannot be handled
-        if token.text.strip() == '':
-            return
 
         self.tokens.append(token)
 
@@ -694,10 +606,9 @@ class Sentence(DataPoint):
             vector = vector.to(device)
         self._embeddings[name] = vector
 
-    def get_embedding(self, names: Optional[List[str]] = None) -> torch.tensor:
+    def get_embedding(self) -> torch.tensor:
         embeddings = []
         for embed in sorted(self._embeddings.keys()):
-            if names and embed not in names: continue
             embedding = self._embeddings[embed]
             embeddings.append(embedding)
 
@@ -785,7 +696,7 @@ class Sentence(DataPoint):
             tags = iob_iobes(tags)
 
         for index, tag in enumerate(tags):
-            self.tokens[index].set_label(tag_type, tag)
+            self.tokens[index].add_label(tag_type, tag)
 
     def infer_space_after(self):
         """
@@ -825,7 +736,7 @@ class Sentence(DataPoint):
         str = ""
         pos = 0
         for t in self.tokens:
-            while t.start_pos > pos:
+            while t.start_pos != pos:
                 str += " "
                 pos += 1
 
@@ -850,9 +761,6 @@ class Sentence(DataPoint):
 
     def __iter__(self):
         return iter(self.tokens)
-
-    def __len__(self) -> int:
-        return len(self.tokens)
 
     def __repr__(self):
         tagged_string = self.to_tagged_string()
@@ -892,6 +800,9 @@ class Sentence(DataPoint):
         token_labels = f'  − Token-Labels: "{tagged_string}"' if tokenized_string != tagged_string else ""
 
         return f'Sentence: "{tokenized_string}"   [− Tokens: {len(self)}{token_labels}{sentence_labels}]'
+
+    def __len__(self) -> int:
+        return len(self.tokens)
 
     def get_language_code(self) -> str:
         if self.language_code is None:
@@ -994,17 +905,17 @@ class Corpus:
         if test is None:
             train_length = len(train)
             test_size: int = round(train_length / 10)
-            splits = randomly_split_into_two_datasets(train, test_size)
-            test = splits[0]
-            train = splits[1]
+            splits = random_split(train, [train_length - test_size, test_size])
+            train = splits[0]
+            test = splits[1]
 
         # sample dev data if none is provided
         if dev is None:
             train_length = len(train)
             dev_size: int = round(train_length / 10)
-            splits = randomly_split_into_two_datasets(train, dev_size)
-            dev = splits[0]
-            train = splits[1]
+            splits = random_split(train, [train_length - dev_size, dev_size])
+            train = splits[0]
+            dev = splits[1]
 
         # set train dev and test data
         self._train: FlairDataset = train
@@ -1023,15 +934,11 @@ class Corpus:
     def test(self) -> FlairDataset:
         return self._test
 
-    def downsample(self, percentage: float = 0.1, downsample_train=True, downsample_dev=True, downsample_test=True):
+    def downsample(self, percentage: float = 0.1, only_downsample_train=False):
 
-        if downsample_train:
-            self._train = self._downsample_to_proportion(self.train, percentage)
-
-        if downsample_dev:
+        self._train = self._downsample_to_proportion(self.train, percentage)
+        if not only_downsample_train:
             self._dev = self._downsample_to_proportion(self.dev, percentage)
-
-        if downsample_test:
             self._test = self._downsample_to_proportion(self.test, percentage)
 
         return self
@@ -1107,8 +1014,8 @@ class Corpus:
     def _downsample_to_proportion(dataset: Dataset, proportion: float):
 
         sampled_size: int = round(len(dataset) * proportion)
-        splits = randomly_split_into_two_datasets(dataset, sampled_size)
-        return splits[0]
+        splits = random_split(dataset, [len(dataset) - sampled_size, sampled_size])
+        return splits[1]
 
     def obtain_statistics(
             self, label_type: str = None, pretty_print: bool = True
@@ -1197,8 +1104,7 @@ class Corpus:
 
         from flair.datasets import DataLoader
 
-        data = ConcatDataset([self.train, self.test])
-        loader = DataLoader(data, batch_size=1)
+        loader = DataLoader(self.train, batch_size=1)
 
         log.info("Computing label dictionary. Progress:")
         for batch in Tqdm.tqdm(iter(loader)):
@@ -1307,15 +1213,183 @@ def iob_iobes(tags):
             raise Exception("Invalid IOB format!")
     return new_tags
 
-def randomly_split_into_two_datasets(dataset, length_of_first):
 
-    import random
-    indices = [i for i in range(len(dataset))]
-    random.shuffle(indices)
+def space_tokenizer(text: str) -> List[Token]:
+    """
+    Tokenizer based on space character only.
+    """
+    tokens: List[Token] = []
+    word = ""
+    index = -1
+    for index, char in enumerate(text):
+        if char == " ":
+            if len(word) > 0:
+                start_position = index - len(word)
+                tokens.append(
+                    Token(
+                        text=word, start_position=start_position, whitespace_after=True
+                    )
+                )
 
-    first_dataset = indices[:length_of_first]
-    second_dataset = indices[length_of_first:]
-    first_dataset.sort()
-    second_dataset.sort()
+            word = ""
+        else:
+            word += char
+    # increment for last token in sentence if not followed by whitespace
+    index += 1
+    if len(word) > 0:
+        start_position = index - len(word)
+        tokens.append(
+            Token(text=word, start_position=start_position, whitespace_after=False)
+        )
+    return tokens
 
-    return [Subset(dataset, first_dataset), Subset(dataset, second_dataset)]
+
+def build_japanese_tokenizer(tokenizer: str = "MeCab"):
+    if tokenizer.lower() != "mecab":
+        raise NotImplementedError("Currently, MeCab is only supported.")
+
+    try:
+        import konoha
+    except ModuleNotFoundError:
+        log.warning("-" * 100)
+        log.warning('ATTENTION! The library "konoha" is not installed!')
+        log.warning(
+            'To use Japanese tokenizer, please first install with the following steps:'
+        )
+        log.warning(
+            '- Install mecab with "sudo apt install mecab libmecab-dev mecab-ipadic"'
+        )
+        log.warning('- Install konoha with "pip install konoha[mecab]"')
+        log.warning("-" * 100)
+        pass
+
+    sentence_tokenizer = konoha.SentenceTokenizer()
+    word_tokenizer = konoha.WordTokenizer(tokenizer)
+
+    def tokenizer(text: str) -> List[Token]:
+        """
+        Tokenizer using konoha, a third party library which supports
+        multiple Japanese tokenizer such as MeCab, KyTea and SudachiPy.
+        """
+        tokens: List[Token] = []
+        words: List[str] = []
+
+        sentences = sentence_tokenizer.tokenize(text)
+        for sentence in sentences:
+            konoha_tokens = word_tokenizer.tokenize(sentence)
+            words.extend(list(map(str, konoha_tokens)))
+
+        # determine offsets for whitespace_after field
+        index = text.index
+        current_offset = 0
+        previous_word_offset = -1
+        previous_token = None
+        for word in words:
+            try:
+                word_offset = index(word, current_offset)
+                start_position = word_offset
+            except:
+                word_offset = previous_word_offset + 1
+                start_position = (
+                    current_offset + 1 if current_offset > 0 else current_offset
+                )
+
+            token = Token(
+                text=word, start_position=start_position, whitespace_after=True
+            )
+            tokens.append(token)
+
+            if (previous_token is not None) and word_offset - 1 == previous_word_offset:
+                previous_token.whitespace_after = False
+
+            current_offset = word_offset + len(word)
+            previous_word_offset = current_offset - 1
+            previous_token = token
+
+        return tokens
+
+    return tokenizer
+
+
+def segtok_tokenizer(text: str) -> List[Token]:
+    """
+    Tokenizer using segtok, a third party library dedicated to rules-based Indo-European languages.
+    https://github.com/fnl/segtok
+    """
+    tokens: List[Token] = []
+
+    words: List[str] = []
+    sentences = split_single(text)
+    for sentence in sentences:
+        contractions = split_contractions(word_tokenizer(sentence))
+        words.extend(contractions)
+
+    # determine offsets for whitespace_after field
+    index = text.index
+    current_offset = 0
+    previous_word_offset = -1
+    previous_token = None
+    for word in words:
+        try:
+            word_offset = index(word, current_offset)
+            start_position = word_offset
+        except:
+            word_offset = previous_word_offset + 1
+            start_position = (
+                current_offset + 1 if current_offset > 0 else current_offset
+            )
+
+        if word:
+            token = Token(
+                text=word, start_position=start_position, whitespace_after=True
+            )
+            tokens.append(token)
+
+        if (previous_token is not None) and word_offset - 1 == previous_word_offset:
+            previous_token.whitespace_after = False
+
+        current_offset = word_offset + len(word)
+        previous_word_offset = current_offset - 1
+        previous_token = token
+
+    return tokens
+
+
+def build_spacy_tokenizer(model) -> Callable[[str], List[Token]]:
+    """
+    Wrap Spacy model to build a tokenizer for the Sentence class.
+    :param model a Spacy V2 model
+    :return a tokenizer function to provide to Sentence class constructor
+    """
+    try:
+        from spacy.language import Language
+        from spacy.tokens.doc import Doc
+        from spacy.tokens.token import Token as SpacyToken
+    except ImportError:
+        raise ImportError(
+            "Please install Spacy v2.0 or better before using the Spacy tokenizer, otherwise you can use segtok_tokenizer as advanced tokenizer."
+        )
+
+    model: Language = model
+
+    def tokenizer(text: str) -> List[Token]:
+        doc: Doc = model.make_doc(text)
+        previous_token = None
+        tokens: List[Token] = []
+        for word in doc:
+            word: SpacyToken = word
+            token = Token(
+                text=word.text, start_position=word.idx, whitespace_after=True
+            )
+            tokens.append(token)
+
+            if (previous_token is not None) and (
+                    token.start_pos - 1
+                    == previous_token.start_pos + len(previous_token.text)
+            ):
+                previous_token.whitespace_after = False
+
+            previous_token = token
+        return tokens
+
+    return tokenizer

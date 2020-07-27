@@ -1,22 +1,21 @@
-import logging
 import os
+from typing import List, Dict, Union, Callable
 import re
-
-from deprecated import deprecated
+import logging
 from enum import Enum
 from pathlib import Path
-from typing import List, Dict, Union
 
+from deprecated import deprecated
 
 import flair
 from flair.data import (
     Sentence,
     Corpus,
     Token,
-    Tokenizer,
-    MultiCorpus
+    MultiCorpus,
+    space_tokenizer,
+    segtok_tokenizer,
 )
-from flair.tokenization import SegtokTokenizer, SpaceTokenizer
 from flair.file_utils import cached_path
 
 log = logging.getLogger("flair")
@@ -120,15 +119,15 @@ class NLPTaskDataFetcher:
     @staticmethod
     @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
     def load_corpora(
-        tasks: List[Union[NLPTask, str]], base_path: Union[str, Path] = None
+        tasks: List[Union[NLPTask, str]], base_path: Path = None
     ) -> MultiCorpus:
         return MultiCorpus(
-            [NLPTaskDataFetcher.load_corpus(task, Path(base_path)) for task in tasks]
+            [NLPTaskDataFetcher.load_corpus(task, base_path) for task in tasks]
         )
 
     @staticmethod
     @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
-    def load_corpus(task: Union[NLPTask, str], base_path: Union[str, Path] = None) -> Corpus:
+    def load_corpus(task: Union[NLPTask, str], base_path: [str, Path] = None) -> Corpus:
         """
         Helper function to fetch a Corpus for a specific NLPTask. For this to work you need to first download
         and put into the appropriate folder structure the corresponding NLP task data. The tutorials on
@@ -233,10 +232,10 @@ class NLPTaskDataFetcher:
             NLPTask.TREC_50.value,
             NLPTask.REGRESSION.value,
         ]:
-            tokenizer: Tokenizer = SpaceTokenizer() if task in [
+            tokenizer: Callable[[str], List[Token]] = space_tokenizer if task in [
                 NLPTask.TREC_6.value,
                 NLPTask.TREC_50.value,
-            ] else SegtokTokenizer()
+            ] else segtok_tokenizer
 
             return NLPTaskDataFetcher.load_classification_corpus(
                 data_folder, tokenizer=tokenizer
@@ -251,7 +250,7 @@ class NLPTaskDataFetcher:
 
         if task.startswith("wassa"):
             return NLPTaskDataFetcher.load_classification_corpus(
-                data_folder, tokenizer=SegtokTokenizer()
+                data_folder, tokenizer=segtok_tokenizer
             )
 
     @staticmethod
@@ -404,7 +403,7 @@ class NLPTaskDataFetcher:
         train_file=None,
         test_file=None,
         dev_file=None,
-        tokenizer: Tokenizer = SegtokTokenizer(),
+        tokenizer: Callable[[str], List[Token]] = segtok_tokenizer,
         max_tokens_per_doc=-1,
     ) -> Corpus:
         """
@@ -414,7 +413,6 @@ class NLPTaskDataFetcher:
         :param train_file: the name of the train file
         :param test_file: the name of the test file
         :param dev_file: the name of the dev file, if None, dev data is sampled from train
-        :param tokenizer: Custom tokenizer to use (default SegtokTokenizer)
         :return: a Corpus with annotated train, dev and test data
         """
 
@@ -479,7 +477,7 @@ class NLPTaskDataFetcher:
     def read_text_classification_file(
         path_to_file: Union[str, Path],
         max_tokens_per_doc=-1,
-        tokenizer: Tokenizer = SegtokTokenizer(),
+        tokenizer=segtok_tokenizer,
     ) -> List[Sentence]:
         """
         Reads a data file for text classification. The file should contain one document/text per line.
@@ -489,7 +487,6 @@ class NLPTaskDataFetcher:
         __label__<class_name_1> __label__<class_name_2> <text>
         :param path_to_file: the path to the data file
         :param max_tokens_per_doc: Takes at most this amount of tokens per document. If set to -1 all documents are taken as is.
-        :param tokenizer: Custom tokenizer to use to prepare the data set (default SegtokTokenizer)
         :return: list of sentences
         """
         label_prefix = "__label__"
@@ -524,7 +521,7 @@ class NLPTaskDataFetcher:
     @staticmethod
     @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
     def read_column_data(
-        path_to_column_file: Union[str, Path],
+        path_to_column_file: Path,
         column_name_map: Dict[int, str],
         infer_whitespace_after: bool = True,
     ):
@@ -573,7 +570,7 @@ class NLPTaskDataFetcher:
                 sentence: Sentence = Sentence()
 
             else:
-                fields: List[str] = re.split(r"\s+", line)
+                fields: List[str] = re.split("\s+", line)
                 token = Token(fields[text_column])
                 for column in column_name_map:
                     if len(fields) > column:
@@ -590,7 +587,7 @@ class NLPTaskDataFetcher:
 
     @staticmethod
     @deprecated(version="0.4.1", reason="Use 'flair.datasets' instead.")
-    def read_conll_ud(path_to_conll_file: Union[str, Path]) -> List[Sentence]:
+    def read_conll_ud(path_to_conll_file: Path) -> List[Sentence]:
         """
        Reads a file in CoNLL-U format and produces a list of Sentence with full morphosyntactic annotation
        :param path_to_conll_file: the path to the conll-u file

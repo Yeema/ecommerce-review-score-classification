@@ -7,11 +7,9 @@ from abc import abstractmethod
 
 from typing import Union, List
 
-from torch.utils.data.dataset import Dataset
-
 import flair
 from flair import file_utils
-from flair.data import DataPoint, Sentence
+from flair.data import DataPoint
 from flair.datasets import DataLoader
 from flair.training_utils import Result
 
@@ -30,7 +28,7 @@ class Model(torch.nn.Module):
     @abstractmethod
     def evaluate(
         self,
-        sentences: Union[List[DataPoint], Dataset],
+        data_loader: DataLoader,
         out_path: Path = None,
         embedding_storage_mode: str = "none",
     ) -> (Result, float):
@@ -85,7 +83,7 @@ class Model(torch.nn.Module):
             # load_big_file is a workaround by https://github.com/highway11git to load models on some Mac/Windows setups
             # see https://github.com/zalandoresearch/flair/issues/351
             f = file_utils.load_big_file(str(model_file))
-            state = torch.load(f, map_location='cpu')
+            state = torch.load(f, map_location=flair.device)
 
         model = cls._init_model_with_state_dict(state)
 
