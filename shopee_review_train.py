@@ -55,7 +55,8 @@ def train(
             BertEmbeddings(),
             # TransformerXLEmbeddings(),
             #RoBERTaEmbeddings(),
-            #XLNetEmbeddings()]
+            #XLNetEmbeddings()
+        ]
         # Can choose between many RNN types (GRU by default, to change use rnn_type parameter)
         document_embeddings: DocumentRNNEmbeddings = DocumentRNNEmbeddings(word_embeddings,
                                                     hidden_size=512,
